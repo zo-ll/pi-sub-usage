@@ -13,9 +13,13 @@
  * The extension is read-only. It resolves the credential that Pi already
  * stores, calls the provider's own usage endpoint, and prints the result.
  * It never writes credentials and never sends a credential anywhere else.
+ *
+ * Set `{ "footer": false }` in `~/.pi/agent/pi-sub-usage.json` to hide the
+ * footer status item. The `/usage` command stays available.
  */
 
 import {
+	getAgentDir,
 	readStoredCredential,
 	type ExtensionAPI,
 	type ExtensionContext,
@@ -28,6 +32,8 @@ import {
 	type Focusable,
 	type TUI,
 } from "@earendil-works/pi-tui";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 const STATUS_KEY = "usage";
 const USER_AGENT = "pi-usage-sub/0.1";
@@ -62,6 +68,36 @@ interface ProviderReport {
 interface ResolvedAuth {
 	isOAuth: boolean;
 	apiKey?: string;
+}
+
+/* ------------------------------------------------------------------ */
+/* Settings                                                            */
+/* ------------------------------------------------------------------ */
+
+interface UsageSettings {
+	/** Show the footer status item and refresh it in the background. */
+	footer: boolean;
+}
+
+const SETTINGS_FILE = "pi-sub-usage.json";
+const DEFAULT_SETTINGS: UsageSettings = { footer: true };
+
+/**
+ * Read `~/.pi/agent/pi-sub-usage.json`.
+ *
+ *   { "footer": false }
+ *
+ * A missing, unreadable, or invalid file keeps the defaults. A footer value
+ * other than `false` keeps the footer enabled.
+ */
+function loadSettings(): UsageSettings {
+	try {
+		const raw = readFileSync(join(getAgentDir(), SETTINGS_FILE), "utf8");
+		const parsed = JSON.parse(raw) as { footer?: unknown };
+		return { footer: parsed.footer !== false };
+	} catch {
+		return DEFAULT_SETTINGS;
+	}
 }
 
 /* ------------------------------------------------------------------ */
@@ -396,8 +432,12 @@ function usageBar(theme: Theme, usedPercent: number, width = 12): string {
 	return on + off;
 }
 
-function updateStatus(ctx: ExtensionContext, reports: ProviderReport[]): void {
+function updateStatus(ctx: ExtensionContext, reports: ProviderReport[], enabled: boolean): void {
 	if (!ctx.hasUI) return;
+	if (!enabled) {
+		ctx.ui.setStatus(STATUS_KEY, undefined);
+		return;
+	}
 	const parts: string[] = [];
 	for (const report of reports) {
 		if (report.error && report.windows.length === 0) continue;
@@ -532,11 +572,13 @@ export class UsagePanel implements Focusable {
 
 export default function usageExtension(pi: ExtensionAPI) {
 	let timer: ReturnType<typeof setInterval> | undefined;
+	let settings = loadSettings();
 
 	const refreshStatus = async (ctx: ExtensionContext, force: boolean): Promise<void> => {
+		if (!settings.footer) return;
 		try {
 			const reports = await fetchAll(ctx, force, ctx.signal);
-			updateStatus(ctx, reports);
+			updateStatus(ctx, reports, true);
 		} catch {
 			// Status is best-effort. Keep the previous value on failure.
 		}
@@ -550,7 +592,7 @@ export default function usageExtension(pi: ExtensionAPI) {
 					(tui, theme, _keybindings, done) =>
 						new UsagePanel(tui, theme, () => done(undefined), async (force) => {
 							const reports = await fetchAll(ctx, force, ctx.signal);
-							updateStatus(ctx, reports);
+							updateStatus(ctx, reports, settings.footer);
 							return reports;
 						}),
 					{
@@ -561,13 +603,22 @@ export default function usageExtension(pi: ExtensionAPI) {
 				return;
 			}
 			const reports = await fetchAll(ctx, true, ctx.signal);
-			updateStatus(ctx, reports);
+			updateStatus(ctx, reports, settings.footer);
 			ctx.ui.notify(plainReport(reports), "info");
 		},
 	});
 
 	pi.on("session_start", (_event, ctx) => {
+		settings = loadSettings();
+		if (timer) {
+			clearInterval(timer);
+			timer = undefined;
+		}
 		if (!ctx.hasUI) return;
+		if (!settings.footer) {
+			ctx.ui.setStatus(STATUS_KEY, undefined);
+			return;
+		}
 		void refreshStatus(ctx, false);
 		timer = setInterval(() => {
 			void refreshStatus(ctx, false);

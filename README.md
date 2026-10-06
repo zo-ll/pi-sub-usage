@@ -55,8 +55,25 @@ current session.
 | `r` | Fetch fresh data. |
 | `q` / `Esc` | Close the panel. |
 
-Pi also shows a compact `usage` item in the footer. The item refreshes every
-five minutes.
+Pi also shows a compact `usage` item in the footer. The item is optional and
+refreshes every five minutes.
+
+## Settings
+
+Create `~/.pi/agent/pi-sub-usage.json` to change the footer behavior:
+
+```json
+{
+  "footer": false
+}
+```
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| `footer` | `true` | `false` hides the footer status item and stops the background refresh. The `/usage` command stays available. |
+
+The file is optional. A missing or invalid file keeps the defaults. Run
+`/reload` after an edit.
 
 ## Providers
 
@@ -90,6 +107,8 @@ install a third-party extension.
 
 ## Notes
 
+- The footer status item is off when `footer` is `false` in
+  `~/.pi/agent/pi-sub-usage.json`.
 - Window labels follow the provider: `5h` is the rolling window, `7d` is the
   weekly window, and `30d` is the OpenCode Go monthly window.
 - Pi refreshes an expired OAuth access token before each request.
