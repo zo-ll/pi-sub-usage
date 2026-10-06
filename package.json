@@ -1,6 +1,6 @@
 {
   "name": "pi-sub-usage",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Pi extension that shows subscription plan usage for opencode-go, OpenAI (ChatGPT), and Claude.",
   "type": "module",
   "license": "MIT",

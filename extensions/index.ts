@@ -167,6 +167,28 @@ function codexAccountId(accessToken: string, providerId: string): string | undef
 /* HTTP                                                                */
 /* ------------------------------------------------------------------ */
 
+/** HTTP failure with the status and, on 429, the server's retry delay. */
+class HttpError extends Error {
+	readonly status: number;
+	readonly retryAfterMs?: number;
+
+	constructor(status: number, statusText: string, retryAfterMs?: number) {
+		super(`HTTP ${status}${statusText ? ` ${statusText}` : ""}`);
+		this.name = "HttpError";
+		this.status = status;
+		this.retryAfterMs = retryAfterMs;
+	}
+}
+
+function parseRetryAfter(value: string | null): number | undefined {
+	if (!value) return undefined;
+	const seconds = Number(value);
+	if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+	const date = Date.parse(value);
+	if (Number.isFinite(date)) return Math.max(0, date - Date.now());
+	return undefined;
+}
+
 async function fetchJson(
 	url: string,
 	headers: Record<string, string>,
@@ -176,7 +198,11 @@ async function fetchJson(
 	const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
 	const response = await fetch(url, { headers, signal: combined, redirect: "error" });
 	if (!response.ok) {
-		throw new Error(`HTTP ${response.status} ${response.statusText}`.trim());
+		throw new HttpError(
+			response.status,
+			response.statusText,
+			response.status === 429 ? parseRetryAfter(response.headers.get("retry-after")) : undefined,
+		);
 	}
 	const text = await response.text();
 	try {
@@ -186,7 +212,34 @@ async function fetchJson(
 	}
 }
 
+/** Hold-off after a 429 when the server sends no Retry-After header. */
+const DEFAULT_RATE_LIMIT_MS = 60_000;
+
+/** Provider id -> epoch ms. No request goes out before this time. */
+const cooldownUntil = new Map<string, number>();
+
+function rateLimitNote(until: number): string {
+	return `rate limited · retry in ${formatDuration(until - Date.now())}`;
+}
+
+/**
+ * Map a provider failure to a short, secret-free message.
+ * A 429 sets a cooldown for that provider, so later refreshes stay local.
+ */
+function describeProviderError(providerId: string, error: unknown): string {
+	if (error instanceof HttpError && error.status === 429) {
+		const until = Date.now() + (error.retryAfterMs ?? DEFAULT_RATE_LIMIT_MS);
+		cooldownUntil.set(providerId, until);
+		return rateLimitNote(until);
+	}
+	return describeError(error);
+}
+
 function describeError(error: unknown): string {
+	if (error instanceof HttpError) {
+		if (error.status === 401 || error.status === 403) return "sign-in expired";
+		return `HTTP ${error.status}`;
+	}
 	const message = error instanceof Error ? error.message : String(error);
 	if (/\b(401|403)\b|unauthorized|forbidden|invalid[_ ]token/i.test(message)) {
 		return "sign-in expired";
@@ -287,7 +340,7 @@ async function fetchOpenCodeGo(ctx: ExtensionContext, signal?: AbortSignal): Pro
 			error: windows.length > 0 ? undefined : "no usage data",
 		};
 	} catch (err) {
-		return { ...report, error: describeError(err) };
+		return { ...report, error: describeProviderError(report.id, err) };
 	}
 }
 
@@ -333,7 +386,7 @@ async function fetchOpenAI(ctx: ExtensionContext, signal?: AbortSignal): Promise
 			error: windows.length > 0 ? undefined : "no usage data",
 		};
 	} catch (err) {
-		return { ...fallback, error: describeError(err) };
+		return { ...fallback, error: describeProviderError(fallback.id, err) };
 	}
 }
 
@@ -366,7 +419,7 @@ async function fetchAnthropic(ctx: ExtensionContext, signal?: AbortSignal): Prom
 			error: windows.length > 0 ? undefined : "no usage data",
 		};
 	} catch (err) {
-		return { ...report, error: describeError(err) };
+		return { ...report, error: describeProviderError(report.id, err) };
 	}
 }
 
@@ -375,6 +428,10 @@ async function fetchAnthropic(ctx: ExtensionContext, signal?: AbortSignal): Prom
 /* ------------------------------------------------------------------ */
 
 const cache = new Map<string, { at: number; report: ProviderReport }>();
+const lastAttempt = new Map<string, number>();
+
+/** Minimum gap between two forced refreshes of one provider. */
+const MIN_FORCE_INTERVAL_MS = 3_000;
 
 const PROVIDERS: ReadonlyArray<{
 	id: string;
@@ -391,8 +448,19 @@ async function fetchAll(
 	signal?: AbortSignal,
 ): Promise<ProviderReport[]> {
 	const settled = PROVIDERS.map(async ({ id, run }) => {
+		const now = Date.now();
 		const hit = cache.get(id);
-		if (!force && hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.report;
+
+		const blockedUntil = cooldownUntil.get(id);
+		if (blockedUntil !== undefined && blockedUntil > now) {
+			const note = rateLimitNote(blockedUntil);
+			return hit ? { ...hit.report, error: note } : { id, name: id, windows: [], error: note };
+		}
+
+		if (!force && hit && now - hit.at < CACHE_TTL_MS) return hit.report;
+		if (force && hit && now - (lastAttempt.get(id) ?? 0) < MIN_FORCE_INTERVAL_MS) return hit.report;
+
+		lastAttempt.set(id, now);
 		const report = await run(ctx, signal);
 		cache.set(id, { at: Date.now(), report });
 		return report;
@@ -460,6 +528,7 @@ function plainReport(reports: ProviderReport[]): string {
 		for (const window of report.windows) {
 			lines.push(`  ${window.label}: ${Math.round(window.usedPercent)}% used${resetSuffix(window.resetsAt)}`);
 		}
+		if (report.error) lines.push(`  ${report.error}`);
 	}
 	return lines.join("\n");
 }
@@ -541,19 +610,18 @@ export class UsagePanel implements Focusable {
 				if (report.plan) head += theme.fg("dim", ` · ${report.plan}`);
 				if (report.account) head += theme.fg("dim", ` · ${report.account}`);
 				lines.push(row(head));
-				if (report.windows.length === 0) {
+				for (const window of report.windows) {
+					const label = theme.fg("text", window.label.padStart(3));
+					const percent = theme.fg("text", `${Math.round(window.usedPercent)}%`.padStart(4));
+					lines.push(
+						row(
+							`   ${label}  ${usageBar(theme, window.usedPercent)} ${percent}` +
+								theme.fg("dim", resetSuffix(window.resetsAt)),
+						),
+					);
+				}
+				if (report.windows.length === 0 || report.error) {
 					lines.push(row("   " + theme.fg("warning", report.error ?? "no usage data")));
-				} else {
-					for (const window of report.windows) {
-						const label = theme.fg("text", window.label.padStart(3));
-						const percent = theme.fg("text", `${Math.round(window.usedPercent)}%`.padStart(4));
-						lines.push(
-							row(
-								`   ${label}  ${usageBar(theme, window.usedPercent)} ${percent}` +
-									theme.fg("dim", resetSuffix(window.resetsAt)),
-							),
-						);
-					}
 				}
 				lines.push(row(""));
 			}

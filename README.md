@@ -116,6 +116,10 @@ install a third-party extension.
   `unavailable` when a response no longer contains usage data.
 - Results are cached for 60 seconds, so `/usage` and the footer do not hammer
   the provider.
+- A forced refresh (`r`) runs at most once every 3 seconds for each provider.
+- A provider `429` starts a cooldown. The extension reads the `Retry-After`
+  header, or waits 60 seconds. During the cooldown the panel shows the last
+  values with a `rate limited · retry in X` note and sends no request.
 
 ## Development
 
