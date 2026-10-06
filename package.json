@@ -1,0 +1,35 @@
+{
+  "name": "pi-sub-usage",
+  "version": "0.1.0",
+  "description": "Pi extension that shows subscription plan usage for opencode-go, OpenAI (ChatGPT), and Claude.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "usage",
+    "subscription",
+    "quota",
+    "opencode",
+    "openai",
+    "chatgpt",
+    "codex",
+    "claude",
+    "anthropic"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  },
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}
